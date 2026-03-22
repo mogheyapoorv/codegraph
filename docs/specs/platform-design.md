@@ -648,35 +648,106 @@ Generated when repos are in a group. Built from cross-repo entity relations span
 - Diagrams are **eventually consistent** within one job cycle
 - Manual trigger available in Admin Dashboard
 
-### Cross-Repo Resolution — Hybrid Approach
+### Cross-Repo Resolution — Multi-Source Hybrid Approach
 
-We combine three layers for maximum accuracy:
+Our cross-repo detection draws on validated academic work (MiSAR algorithm for annotation/config matching, Code2DFD for pattern detection — F1=0.87 single tool, F1=0.91 ensemble) and adds similarity + LLM reasoning on top.
 
-**Layer 1 — Structural Signals (deterministic, high confidence):**
-- Contract matching: shared .proto files, OpenAPI specs, Kafka topic strings
-- Annotation matching: @FeignClient naming, gRPC stub imports
-- Config matching: service URLs in application.yml, shared datasource URLs
-- Infrastructure matching: docker-compose links, K8s service definitions
+Core principle: **never depend on one source. Collect everything available. More sources = higher confidence. Missing sources = graceful degradation, not failure.**
 
-**Layer 2 — Similarity Signals (vector-based, medium confidence):**
+#### Source Collectors (per dependency type, deterministic)
+
+**REST API dependencies — all sources:**
+- @FeignClient annotations (explicit service name + path)
+- RestTemplate / WebClient / HttpClient URL strings (Spoon traces URL construction)
+- OpenAPI spec if checked in (via swagger-parser — complete API contract)
+- Spring Cloud Gateway / Zuul route config (URL-to-service mappings)
+- application.yml service URLs (e.g., `payment.service.url=http://payment-service:8080`)
+- Environment variables in Dockerfile / K8s manifests (PAYMENT_SERVICE_URL pattern)
+- Eureka / Consul service registration config (spring.application.name)
+- Code2DFD-style keyword detection (HTTP client library imports, URL patterns)
+- MS Application Inspector rule matching (cross-language HTTP client detection)
+
+**gRPC dependencies — all sources:**
+- buf.yaml / buf.lock if present (module dependencies, remote schema refs)
+- .proto files directly (service definitions, methods, types — via protobuf-java)
+- Generated stub usage (Spoon: `PaymentServiceGrpc.newBlockingStub()`, `ManagedChannelBuilder.forTarget()`)
+- @GrpcService / @GrpcClient annotations
+- build.gradle / pom.xml protobuf plugin config (proto dependency coordinates)
+
+**Message queue dependencies — all sources:**
+- @KafkaListener(topics="payment.completed") — consumer topic
+- KafkaTemplate.send("payment.completed") — producer topic (Spoon traces method calls)
+- @RabbitListener(queues="payment.queue") — RabbitMQ consumer
+- RabbitTemplate.convertAndSend() — RabbitMQ producer
+- application.yml Kafka/RabbitMQ config (group-id, topics, queues)
+- Spring Cloud Stream bindings (spring.cloud.stream.bindings.input.destination)
+- Docker Compose broker service definitions (depends_on hints)
+- Avro/JSON schema files if present (shared contract between producer/consumer)
+
+**Shared database dependencies — all sources:**
+- JPA @Entity / @Table annotations (table names per service, Spoon extracts)
+- SQL migration files, Flyway/Liquibase (actual DDL — most accurate, via JSqlParser)
+- application.yml datasource config (same URL in two repos = shared DB)
+- Docker Compose database service definitions
+- K8s manifests / Helm values (DATABASE_URL env vars pointing to same host)
+- Spring Data @Query annotations (native queries reveal actual table names)
+
+**Shared library / internal SDK dependencies — all sources:**
+- pom.xml / build.gradle dependency coordinates (com.acme:payment-client)
+- Import statements where Spoon can't resolve types (likely internal/private library)
+- Multi-module project structure (root pom.xml with modules)
+- Gradle composite builds / included builds
+
+**Infrastructure / service topology — all sources:**
+- Docker Compose (services, networks, depends_on, links)
+- Kubernetes manifests (Deployments, Services, Ingress, NetworkPolicy)
+- Terraform / Pulumi (infrastructure-as-code resource dependencies)
+- Helm charts (values.yaml, service references)
+- CI/CD pipelines (deploy pipelines reveal service groupings)
+- CODEOWNERS (same team owns multiple repos → likely related)
+
+#### Cross-Repo Matcher
+
+For each signal from repo A, find matching signal in other repos in the group:
+- REST client URL → match to REST endpoint path
+- Kafka producer topic → match to consumer topic
+- gRPC stub name → match to proto service definition
+- Table name → match to same table in other repo
+- Internal SDK coordinate → match to publishing repo
+- Datasource URL → match to same DB host in other repo
+
+#### Similarity Layer (pgvector)
+
+For unmatched signals — catches what structural matching misses:
 - Embedding similarity between API client code and endpoint handler code
 - DTO field overlap across repos (similar data types = likely shared contract)
 - Class/method name similarity across repos
-- Unresolved import matching (Spoon couldn't resolve → match to class in another repo)
+- Unresolved import matching (Spoon couldn't resolve → find matching class in another repo)
 
-**Layer 3 — Reasoning Agent (LangGraph, validates and discovers):**
-- Takes Layer 1 + Layer 2 signals plus code snippets from both sides
-- Validates: is this a real connection or a coincidence?
+#### Reasoning Agent (LangGraph)
+
+Takes all structural + similarity signals plus code snippets from both sides:
+- Validates: real connection or coincidence?
 - Rejects false positives (same class name, different purpose)
 - Discovers connections both layers missed
 - Enriches: describes the nature of each connection (sync call, async event, shared data)
 
-**Multi-signal confidence scoring:**
-- All 3 layers agree → 1.0
-- Structural + one other → 0.9-0.95
-- Similarity + agent confirmed → 0.8-0.85
-- Single weak signal → 0.5-0.6 (excluded from diagrams)
-- Diagram inclusion threshold: >= 0.8 (solid line), 0.6-0.8 (dashed "inferred" line), < 0.6 (excluded)
+#### Multi-Source Confidence Scoring
+
+More sources agreeing = higher confidence:
+- 5+ sources agree → 1.0
+- 3-4 sources agree → 0.95
+- 2 sources agree → 0.9
+- 1 structural source → 0.8
+- Similarity only (no structural) → 0.6-0.7
+- Agent-inferred only → 0.5-0.6
+
+Diagram inclusion threshold: >= 0.8 (solid line), 0.6-0.8 (dashed "inferred" line), < 0.6 (excluded)
+
+#### Output
+
+- Entity graph (Apache AGE) — cross-repo relations with confidence scores and evidence
+- Backstage-compatible `catalog-info.yaml` — auto-generated with `consumesApis` / `providesApis` fields, plugs into existing developer portals
 
 ### Sequence Diagram Generation
 
@@ -962,10 +1033,11 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 
 | Category | We Build (Core IP) | We Adopt (Battle-Tested) |
 |---|---|---|
-| Entity graph engine | Consensus engine, cross-repo resolution logic | Spoon 11.3.0, PostgreSQL + AGE |
+| Entity graph engine | Consensus engine | Spoon 11.3.0, PostgreSQL + AGE |
+| Cross-repo resolution | Multi-source matcher, confidence scoring | MiSAR algorithm, Code2DFD patterns, MS Application Inspector rules, Buf, Backstage catalog model |
 | Wiki generation | Wiki agent, page planning, content generation | LangGraph, LangChain, Mermaid |
 | Chat intelligence | Adaptive search, graph-grounded verification, scope-aware retrieval | LangGraph, pgvector, pg_trgm |
-| API Catalog | curl/grpcurl template generation, payload examples | swagger-parser, protobuf, Spoon type resolution |
+| API Catalog | curl/grpcurl template generation, payload examples | swagger-parser, protobuf-java, Spoon type resolution |
 | Static analysis | Risk flag storage per entity | PMD 7.x (Java), Ruff (Python), RuboCop (Ruby), Biome (TS/JS) |
 | Git intelligence | Metric aggregation per entity | PyDriller (git mining, bus factor, churn) |
 | Plugin model | Event contracts, extractor interface | Kafka, Docker |
