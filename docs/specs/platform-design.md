@@ -62,7 +62,7 @@ graph TB
     end
 
     subgraph Java Extractor
-        JDT[Eclipse JDT + Framework Parsers<br/>Tier 1 deterministic extraction<br/>Zero LLM]
+        JDT[Spoon v11.3.0 + Framework Parsers<br/>Tier 1 deterministic extraction<br/>Zero LLM]
     end
 
     subgraph PostgreSQL
@@ -102,7 +102,7 @@ graph TB
 | Backend | Python (FastAPI + LangGraph + LangChain) | One language for all intelligence + API. In-process agent tools mean zero network hops. |
 | Frontend | Next.js 15 + Vercel AI SDK | Best AI chat rendering library available. SSR for wiki pages. |
 | Chat Agent | LangGraph | Best-in-class planning, evaluation, checkpointing, and multi-step reasoning. |
-| Java Extractor | Java (Eclipse JDT) | JVM-native compiler-level analysis. The only JVM component in the stack. |
+| Java Extractor | Java (Spoon v11.3.0) | JVM-native compiler-level analysis via Spoon metamodel (JDT underneath). The only JVM component in the stack. |
 | Event Bus | Kafka (KRaft) | Durable log, replay, partition by repo_id, solid plugin ecosystem. |
 | Database | PostgreSQL (pgvector + AGE + tsvector + pg_trgm) | One DB for everything. Each component is swappable via an abstraction layer. |
 | Auth | Built-in JWT + optional Keycloak/OIDC | Simple by default, enterprise-ready when you need it. |
@@ -179,7 +179,7 @@ docker-compose up
 #   postgres (pgvector + AGE + pg_trgm)
 #   kafka (KRaft, single broker)
 #   backend (Python — FastAPI + LangGraph)
-#   java-extractor (JVM — Eclipse JDT)
+#   java-extractor (JVM — Spoon v11.3.0)
 #   frontend (Next.js)
 
 # 4. Open http://localhost:3000/setup for first-time admin bootstrap
@@ -442,25 +442,27 @@ This doesn't run as part of individual repo indexing — it's a group-level conc
 
 Three analyzers run in parallel, and a consensus engine merges the results:
 
-**Analyzer 1 — Eclipse JDT (AST + Type Resolution):**
-- Parses all Java files in one batch with full type resolution
+**Analyzer 1 — Spoon v11.3.0 (AST + Type Resolution):**
+- Built on Eclipse JDT — same compiler-grade type resolution (95%+), but with a much cleaner metamodel API (`CtClass`, `CtMethod`, `CtInvocation` instead of raw JDT visitors)
+- Parses all Java files in batch with full type resolution
 - Classpath from downloaded Maven/Gradle JARs (dependency download only, no compilation)
+- **NOCLASSPATH mode** — when JARs are unavailable (private Maven repos, internal libraries), Spoon degrades gracefully with partial results and clearly marked unresolved references, instead of just failing. This is critical for "works on any repo."
 - Produces: classes, methods, fields, annotations, call graph, type hierarchy, import graph
-- Annotation scanning: classifies every annotation as known-framework or custom
+- Annotation scanning via `CtAnnotation` — classifies every annotation as known-framework or custom, with full access to annotation values and meta-annotations
 - Lombok plugin for desugaring (no compilation needed)
 
-**Why Eclipse JDT?** We evaluated the alternatives:
+**Why Spoon?** We evaluated the alternatives:
 
 | Tool | Type Resolution | No Build Required? | Why Not |
 |---|---|---|---|
-| **Eclipse JDT** | 95%+ (compiler-grade) | Yes (source + JARs) | **Our choice.** |
-| **Spoon (INRIA)** | Same as JDT (built on top of it) | Yes, with NOCLASSPATH mode | Viable alternative. Cleaner API, but extra abstraction layer. We may switch to Spoon if JDT's API verbosity becomes a maintenance issue. |
+| **Spoon v11.3.0 (INRIA)** | 95%+ (uses JDT internally) | Yes, with NOCLASSPATH graceful degradation | **Our choice.** Clean API, best handling of missing dependencies. |
+| **Eclipse JDT (direct)** | 95%+ (compiler-grade) | Yes (source + JARs) | Same resolution quality but verbose IDE-oriented API. Spoon wraps it with a better developer experience. |
 | **JavaParser + Symbol Solver** | 60-80% (known gaps with generics, lambdas, overloads) | Yes | Resolution accuracy too low for reliable call graphs on enterprise code. |
 | **IntelliJ PSI** | Best-in-class | Impractical outside IDE | Can't be extracted from the IntelliJ platform. JetBrains themselves say it's not supported. |
 | **tree-sitter** | None (syntax only) | Yes | No semantic analysis. Useful for other languages where no better parser exists, but not for Java. |
 | **Soot/SootUp** | Full (bytecode only) | No — needs compilation | Best call graph construction, but requires compiled .class files. We can't reliably compile arbitrary repos. |
 
-JDT gives us compiler-grade type resolution from source without compilation. That's the hard requirement. The 20+ years of production use and active maintenance (1K+ commits/year) seal it. Spoon is our fallback if we want a cleaner API — it uses JDT underneath so the resolution quality is identical.
+Spoon gives us JDT's compiler-grade type resolution with a clean metamodel and NOCLASSPATH mode for graceful handling of missing dependencies. It's actively maintained (v11.3.0, supports Java 21+), and the INRIA research team behind it has been at this for 15+ years.
 
 **Analyzer 2 — Framework-Specific Parsers:**
 - Spring annotations → beans, endpoints, DI wiring
@@ -488,7 +490,7 @@ JDT gives us compiler-grade type resolution from source without compilation. Tha
 
 Note: entity confidence (from extraction) and relation confidence (from cross-repo resolution, Section 6) measure different things. Entity confidence = "how certain is this entity's type?" Relation confidence = "how certain is this cross-repo connection?"
 
-**No compilation required.** JDT resolves types from source + downloaded JARs. Framework parsers read annotations and config files directly. Works on any repo.
+**No compilation required.** Spoon resolves types from source + downloaded JARs (via JDT internally). NOCLASSPATH mode handles missing dependencies gracefully. Framework parsers read annotations and config files directly. Works on any repo.
 
 **Tier 2: LLM Gap-Fill (automatic, fills the remaining 5-30%)**
 
@@ -655,7 +657,7 @@ We combine three layers for maximum accuracy:
 - Embedding similarity between API client code and endpoint handler code
 - DTO field overlap across repos (similar data types = likely shared contract)
 - Class/method name similarity across repos
-- Unresolved import matching (JDT couldn't resolve → match to class in another repo)
+- Unresolved import matching (Spoon couldn't resolve → match to class in another repo)
 
 **Layer 3 — Reasoning Agent (LangGraph, validates and discovers):**
 - Takes Layer 1 + Layer 2 signals plus code snippets from both sides
@@ -891,7 +893,7 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 - PostgreSQL setup (pgvector + AGE + tsvector + pg_trgm)
 - Python backend (FastAPI), auth (built-in JWT), admin API
 - Kafka setup (KRaft, core event topics)
-- Java Extractor (Eclipse JDT, framework parsers, Tier 1)
+- Java Extractor (Spoon v11.3.0, framework parsers, Tier 1)
 - LLM integration (LangChain providers, admin config)
 - Tier 2 enrichment (LangChain gap-fill agent)
 - Basic wiki generation (LangGraph wiki generator, single-repo)
@@ -936,26 +938,26 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 
 ## 11. Tech Stack Summary
 
-| Layer | Technology |
-|---|---|
-| Frontend | Next.js 15, React 19, TypeScript, Vercel AI SDK, Tailwind CSS |
-| Backend | Python 3.12+, FastAPI, LangGraph, LangChain |
-| Java Extractor | Java 21, Eclipse JDT, Framework parsers |
-| Database | PostgreSQL 16+ (pgvector, Apache AGE, tsvector, pg_trgm) |
-| Event Bus | Apache Kafka (KRaft mode) |
-| Cache | Redis (optional, cloud only) |
-| Auth | Built-in JWT + optional Keycloak (OIDC/SAML) |
-| LLM Providers | LangChain (Anthropic, OpenAI, Google, Ollama, Bedrock, Azure) + optional LiteLLM proxy |
-| Object Storage | fsspec (local / S3 / GCS / Azure) — wiki content + diagrams only |
-| Diagrams | Mermaid (client-side rendering) |
-| Git Operations | gitpython / subprocess |
-| Deployment | Docker Compose (local), Kubernetes + Helm (cloud) |
+| Layer | Technology | Version |
+|---|---|---|
+| Frontend | Next.js, React, TypeScript, Vercel AI SDK, Tailwind CSS | Next.js 15.3, React 19, AI SDK 4.x, Tailwind 4 |
+| Backend | Python, FastAPI, LangGraph, LangChain | Python 3.13+, FastAPI 0.115+, LangGraph 0.3+, LangChain 0.3+ |
+| Java Extractor | Java, Spoon, Framework parsers | Java 21, Spoon 11.3.0 |
+| Database | PostgreSQL, pgvector, Apache AGE, pg_trgm | PostgreSQL 17, pgvector 0.8+, AGE 1.5+ |
+| Event Bus | Apache Kafka (KRaft mode) | Kafka 3.9+ |
+| Cache | Redis (optional, cloud only) | Redis 7.4+ |
+| Auth | Built-in JWT + optional Keycloak | Keycloak 26+ |
+| LLM Providers | LangChain providers + optional LiteLLM proxy | LiteLLM 1.60+ |
+| Object Storage | fsspec (local / S3 / GCS / Azure) | fsspec 2024.12+ |
+| Diagrams | Mermaid (client-side rendering) | Mermaid 11.4+ |
+| Git Operations | GitPython | GitPython 3.1+ |
+| Deployment | Docker Compose (local), Kubernetes + Helm (cloud) | Compose v2, Helm 3 |
 
 ### What CodeGraph Builds vs Adopts
 
 | Category | We Build (Core IP) | We Adopt (Battle-Tested) |
 |---|---|---|
-| Entity graph engine | Extraction pipeline, consensus engine, cross-repo resolution | PostgreSQL + AGE, Eclipse JDT |
+| Entity graph engine | Extraction pipeline, consensus engine, cross-repo resolution | PostgreSQL + AGE, Spoon 11.3.0 |
 | Wiki generation | Wiki agent, page planning, content generation | LangGraph, LangChain, Mermaid |
 | Chat intelligence | Adaptive search, graph-grounded verification, scope-aware retrieval | LangGraph, pgvector, pg_trgm |
 | API Catalog | Endpoint discovery, curl/grpcurl generation, payload examples | OpenAPI parser, protobuf parser |
