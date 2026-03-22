@@ -151,11 +151,36 @@ All external libraries, tools, standards, and academic references used in this s
 
 ## Academic References
 
-| Reference | Relevance | Context |
-|---|---|---|
-| **MiSAR** (Microservice Architecture Recovery) | Cross-repo dependency detection via annotation and config matching | Used in source collector patterns (04, 08) |
-| **Code2DFD** | Data flow diagram extraction from code, F1=0.87 single tool, F1=0.91 ensemble | Pattern detection for cross-repo resolution (04, 08) |
-| **MS Application Inspector** | Cross-language static analysis rule patterns | We implement the pattern rules, not the tool itself (04, 08) |
+### MiSAR — Microservice Architecture Recovery
+
+Model-driven approach for recovering microservice architectures from source code via annotation and configuration matching. We use MiSAR's patterns in our cross-repo source collectors (04, 08).
+
+| Paper | Authors | Venue | Year | Link |
+|---|---|---|---|---|
+| Towards Micro Service Architecture Recovery: An Empirical Study | Alshuqayran, Ali, Evans | IEEE ICSA 2018 | 2018 | [DOI](https://doi.org/10.1109/ICSA.2018.00014) |
+| MiSAR: The MicroService Architecture Recovery Toolset | Ali, Alshuqayran, Fakeeh, Rohman, Solis | ECSA 2023 (Springer LNCS 14590) | 2023 | [Springer](https://link.springer.com/chapter/10.1007/978-3-031-66326-0_20) |
+| A Model-Driven Architecture Approach for Recovering Microservice Architectures: Defining and Evaluating MiSAR | Alshuqayran, Ali, Evans | Information and Software Technology, Vol. 186 | 2025 | [DOI](https://doi.org/10.1016/j.infsof.2025.107808) |
+
+- **GitHub:** https://github.com/MicroServiceArchitectureRecovery/misar
+
+### Code2DFD — Dataflow Diagram Extraction
+
+Automatic extraction of security-enriched dataflow diagrams from microservice source code. F1=0.87 as single tool, F1=0.91 in ensemble with other recovery tools. We use Code2DFD's pattern detection approach in our cross-repo resolution (04, 08).
+
+| Paper | Authors | Venue | Year | Link |
+|---|---|---|---|---|
+| Automatic Extraction of Security-Rich Dataflow Diagrams for Microservice Applications Written in Java | Schneider, Scandariato | Journal of Systems and Software, Vol. 202 | 2023 | [DOI](https://doi.org/10.1016/j.jss.2023.111722) |
+| Comparison of Static Analysis Architecture Recovery Tools for Microservice Applications | Schneider, Bakhtin, Li, Soldani, Brogi, Cerny, Scandariato, Taibi | Empirical Software Engineering (Springer) | 2025 | [Springer](https://link.springer.com/article/10.1007/s10664-025-10686-2) / [arXiv](https://arxiv.org/abs/2412.08352) |
+
+The comparison paper (2025) is the source of the F1 scores cited in this spec — 13 architecture recovery tools benchmarked across microservice applications.
+
+- **GitHub:** https://github.com/tuhh-softsec/code2DFD
+
+### MS Application Inspector
+
+Cross-platform source code analysis tool from Microsoft using rule-based pattern matching. Identifies what code does (crypto usage, auth patterns, cloud services, HTTP calls) rather than finding bugs. 600+ rule patterns across many languages. We implement the pattern-matching approach for cross-language HTTP client detection in our source collectors — not the tool itself (04, 08).
+
+- **GitHub:** https://github.com/microsoft/ApplicationInspector
 
 ---
 
