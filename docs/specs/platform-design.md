@@ -51,18 +51,18 @@ READ PATH (sync, direct):
 ```mermaid
 graph TB
     subgraph Frontend
-        UI[Next.js 15 + Vercel AI SDK<br/>Wiki Viewer / Chat / API Playground<br/>Entity Graph Explorer / Admin Dashboard]
+        UI[Next.js 16 + Vercel AI SDK 5<br/>Wiki Viewer / Chat / API Playground<br/>Entity Graph Explorer / Admin Dashboard]
     end
 
     subgraph Python Backend
         API[FastAPI<br/>REST API / Chat SSE / Webhooks<br/>Admin API / MCP Server]
         AGENTS[Agents<br/>LangGraph: Chat / Cross-Repo / Wiki Gen / PR Context / Anomaly<br/>LangChain: Enrichment / API Catalog Builder]
-        KAFKA_C[Kafka Consumers<br/>repo.pushed / repo.indexed<br/>entities.extracted / wiki.generated]
+        KAFKA_C[Kafka Consumers<br/>repo.pushed / repo.indexed<br/>entities.extracted / wiki.generated<br/>diagram.stale / api.discovered<br/>repo_group.membership_changed]
         JOBS[Background Jobs<br/>Poller / Diagram Consistency<br/>Anomaly Detection]
     end
 
     subgraph Java Extractor
-        JDT[Spoon v11.3.0 + Framework Parsers<br/>Tier 1 deterministic extraction<br/>Zero LLM]
+        JDT[Spoon 11.x + Framework Parsers<br/>Tier 1 deterministic extraction<br/>Zero LLM]
     end
 
     subgraph PostgreSQL
@@ -99,15 +99,15 @@ graph TB
 
 | Decision | Choice | Why We Chose It |
 |---|---|---|
-| Backend | Python (FastAPI + LangGraph + LangChain) | One language for all intelligence + API. In-process agent tools mean zero network hops. |
-| Frontend | Next.js 15 + Vercel AI SDK | Best AI chat rendering library available. SSR for wiki pages. |
-| Chat Agent | LangGraph | Best-in-class planning, evaluation, checkpointing, and multi-step reasoning. |
-| Java Extractor | Java (Spoon v11.3.0) | JVM-native compiler-level analysis via Spoon metamodel (JDT underneath). The only JVM component in the stack. |
-| Event Bus | Kafka (KRaft) | Durable log, replay, partition by repo_id, solid plugin ecosystem. |
+| Backend | Python (FastAPI + LangGraph 1.x + LangChain 1.x) | One language for all intelligence + API. In-process agent tools mean zero network hops. |
+| Frontend | Next.js 16 + Vercel AI SDK 5 | Best AI chat rendering library available. SSR for wiki pages. |
+| Chat Agent | LangGraph 1.x | GA stable API, stateful graphs, checkpointing, multi-step reasoning. |
+| Java Extractor | Java (Spoon 11.x) | JVM-native compiler-level analysis via Spoon metamodel (JDT underneath). The only JVM component in the stack. |
+| Event Bus | Kafka 4.x (KRaft-only) | Durable log, replay, partition by repo_id, solid plugin ecosystem. ZooKeeper removed in 4.0. |
 | Database | PostgreSQL (pgvector + AGE + tsvector + pg_trgm) | One DB for everything. Each component is swappable via an abstraction layer. |
 | Auth | Built-in JWT + optional Keycloak/OIDC | Simple by default, enterprise-ready when you need it. |
 | LLM Providers | LangChain providers + optional LiteLLM proxy | Admin-configured. Direct or proxy mode. |
-| Chat Memory | LangGraph graph state + PostgreSQL checkpointing | Ephemeral sessions. No Zep/Mem0 needed. |
+| Chat Memory | LangGraph 1.x graph state + PostgreSQL checkpointing | Ephemeral sessions. No Zep/Mem0 needed. |
 | Object Storage | fsspec (local/S3/GCS/Azure) — wiki content only (cloud mode) | Cloud-optional. Local mode stores everything in PostgreSQL. Diagrams always live in PostgreSQL. |
 
 ### Database Abstraction
@@ -130,13 +130,13 @@ Application code talks to repository interfaces. Never to PostgreSQL directly.
 |---|---|---|
 | Repo Indexer | **Pipeline** | Consumes `repo.pushed`, clones/pulls repo to shared volume, computes git diff, stores source files, produces `repo.indexed`. This is the bridge between push events and extraction. |
 | Java Extractor (Tier 1) | **Pipeline** | Deterministic AST analysis via Spoon. No LLM. Reads from shared clone volume. |
-| Enrichment (Tier 2) | **Agent** (LangChain) | LLM fills gaps for unknown annotations. Simpler than LangGraph — no graph/checkpointing needed. |
-| Embedding Worker | **Pipeline** | Chunks source code + wiki content, embeds via LLM provider, stores in pgvector. Triggered by `entities.extracted` (code) and `wiki.generated` (wiki pages). |
+| Enrichment (Tier 2) | **Agent** (LangChain) | Triggered by `entities.extracted`. Runs in the Python backend. LLM fills gaps for unknown annotations. Simpler than LangGraph — no graph/checkpointing needed. |
+| Embedding Worker | **Pipeline** | Chunks source code + wiki content, embeds via LLM provider, stores in pgvector. Subscribes to two topics: `entities.extracted` (code embeddings) and `wiki.generated` (wiki page embeddings). Separate consumer group from other consumers. |
 | Diagram Generator | **Pipeline** | Deterministic: entity graph in, Mermaid out. |
-| Wiki Generator | **Agent** (LangGraph) | Needs to plan structure and reason about content depth. |
+| Wiki Generator | **Agent** (LangGraph) | Triggered by `entities.extracted`. Produces `wiki.generated` and `diagram.stale`. Needs to plan structure and reason about content depth. |
 | Chat (all modes) | **Agent** (LangGraph) | Adaptive search, multi-step reasoning. |
 | Cross-Repo Analysis | **Agent** (LangGraph) | Structural + similarity + reasoning combined. |
-| API Catalog Builder | **Agent** (LangChain) | Generates realistic example payloads. Simpler than LangGraph — no graph/checkpointing needed. |
+| API Catalog Builder | **Agent** (LangChain) | Triggered by `entities.extracted` (after Enrichment completes). Generates realistic example payloads. Produces `api.discovered`. Simpler than LangGraph — no graph/checkpointing needed. |
 | PR Context Injector | **Agent** (LangGraph) | Reasons about blast radius severity. |
 | Anomaly Detector | **Agent** (LangGraph) | Pattern detection, drift judgment. |
 
@@ -179,9 +179,9 @@ docker-compose up
 
 # That's it. Five containers start:
 #   postgres (pgvector + AGE + pg_trgm)
-#   kafka (KRaft, single broker)
+#   kafka (KRaft-only, single broker)
 #   backend (Python — FastAPI + LangGraph)
-#   java-extractor (JVM — Spoon v11.3.0)
+#   java-extractor (JVM — Spoon 11.x)
 #   frontend (Next.js)
 
 # 4. Open http://localhost:3000/setup for first-time admin bootstrap
@@ -444,7 +444,7 @@ This doesn't run as part of individual repo indexing — it's a group-level conc
 
 Three analyzers run in parallel, and a consensus engine merges the results:
 
-**Analyzer 1 — Spoon v11.3.0 (AST + Type Resolution):**
+**Analyzer 1 — Spoon 11.x (AST + Type Resolution):**
 - Built on Eclipse JDT — same compiler-grade type resolution (95%+), but with a much cleaner metamodel API (`CtClass`, `CtMethod`, `CtInvocation` instead of raw JDT visitors)
 - Parses all Java files in batch with full type resolution
 - Classpath from downloaded Maven/Gradle JARs (dependency download only, no compilation)
@@ -457,14 +457,14 @@ Three analyzers run in parallel, and a consensus engine merges the results:
 
 | Tool | Type Resolution | No Build Required? | Why Not |
 |---|---|---|---|
-| **Spoon v11.3.0 (INRIA)** | 95%+ (uses JDT internally) | Yes, with NOCLASSPATH graceful degradation | **Our choice.** Clean API, best handling of missing dependencies. |
+| **Spoon 11.x (INRIA)** | 95%+ (uses JDT internally) | Yes, with NOCLASSPATH graceful degradation | **Our choice.** Clean API, best handling of missing dependencies. |
 | **Eclipse JDT (direct)** | 95%+ (compiler-grade) | Yes (source + JARs) | Same resolution quality but verbose IDE-oriented API. Spoon wraps it with a better developer experience. |
 | **JavaParser + Symbol Solver** | 60-80% (known gaps with generics, lambdas, overloads) | Yes | Resolution accuracy too low for reliable call graphs on enterprise code. |
 | **IntelliJ PSI** | Best-in-class | Impractical outside IDE | Can't be extracted from the IntelliJ platform. JetBrains themselves say it's not supported. |
 | **tree-sitter** | None (syntax only) | Yes | No semantic analysis. Useful for other languages where no better parser exists, but not for Java. |
 | **Soot/SootUp** | Full (bytecode only) | No — needs compilation | Best call graph construction, but requires compiled .class files. We can't reliably compile arbitrary repos. |
 
-Spoon gives us JDT's compiler-grade type resolution with a clean metamodel and NOCLASSPATH mode for graceful handling of missing dependencies. It's actively maintained (v11.3.0, supports Java 21+), and the INRIA research team behind it has been at this for 15+ years.
+Spoon gives us JDT's compiler-grade type resolution with a clean metamodel and NOCLASSPATH mode for graceful handling of missing dependencies. It's actively maintained (11.x requires JDK 17+, supports up to Java 25), and the INRIA research team behind it has been at this for 15+ years.
 
 **Analyzer 2 — Framework-Specific Parsers:**
 - Spring annotations → beans, endpoints, DI wiring (via Spoon `CtAnnotation` processors)
@@ -801,7 +801,7 @@ Same LangGraph agent, same tools. Only the configuration differs.
 
 ### Ephemeral Sessions
 
-- No cross-session memory. Messages live in the browser (`useChat` hook).
+- No cross-session memory. Messages live in the browser (AI SDK `useChat` hook with `sendMessage`).
 - Tab closes = session gone.
 - Wiki changes make old conversations stale anyway — no reason to persist.
 - Deep Research results get saved as wiki pages (the output persists, not the conversation).
@@ -971,7 +971,7 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 - PostgreSQL setup (pgvector + AGE + tsvector + pg_trgm)
 - Python backend (FastAPI), auth (built-in JWT), admin API
 - Kafka setup (KRaft, core event topics)
-- Java Extractor (Spoon v11.3.0, framework parsers, Tier 1)
+- Java Extractor (Spoon 11.x, framework parsers, Tier 1)
 - LLM integration (LangChain providers, admin config)
 - Tier 2 enrichment (LangChain gap-fill agent)
 - Basic wiki generation (LangGraph wiki generator, single-repo)
@@ -1020,15 +1020,15 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 
 | Layer | Technology | Version |
 |---|---|---|
-| Frontend | Next.js, React, TypeScript, Vercel AI SDK, Tailwind CSS | Next.js 15.3, React 19, AI SDK 4.x, Tailwind 4 |
-| Backend | Python, FastAPI, LangGraph, LangChain | Python 3.13+, FastAPI 0.115+, LangGraph 0.3+, LangChain 0.3+ |
-| Java Extractor | Java, Spoon, Framework parsers | Java 21, Spoon 11.3.0 |
-| Database | PostgreSQL, pgvector, Apache AGE, pg_trgm | PostgreSQL 17, pgvector 0.8+, AGE 1.5+ |
-| Event Bus | Apache Kafka (KRaft mode) | Kafka 3.9+ |
-| Cache | Redis (optional, cloud only) | Redis 7.4+ |
+| Frontend | Next.js, React, TypeScript, Vercel AI SDK, Tailwind CSS | Next.js 16, React 19, AI SDK 5.x, Tailwind 4 |
+| Backend | Python, FastAPI, LangGraph, LangChain | Python 3.13+, FastAPI 0.128+, LangGraph 1.0+, LangChain 1.0+ |
+| Java Extractor | Java, Spoon, Framework parsers | Java 21, Spoon 11.x |
+| Database | PostgreSQL, pgvector, Apache AGE, pg_trgm | PostgreSQL 18, pgvector 0.8+, AGE 1.5+ |
+| Event Bus | Apache Kafka (KRaft-only) | Kafka 4.x |
+| Cache | Redis (optional, cloud only) | Redis 8.x |
 | Auth | Built-in JWT + optional Keycloak | Keycloak 26+ |
-| LLM Providers | LangChain providers + optional LiteLLM proxy | LiteLLM 1.60+ |
-| Object Storage | fsspec (local / S3 / GCS / Azure) | fsspec 2024.12+ |
+| LLM Providers | LangChain providers + optional LiteLLM proxy | LiteLLM 1.80+ |
+| Object Storage | fsspec (local / S3 / GCS / Azure) | fsspec 2026.2+ |
 | Diagrams | Mermaid (client-side rendering) | Mermaid 11.4+ |
 | Git Operations | GitPython | GitPython 3.1+ |
 | Deployment | Docker Compose (local), Kubernetes + Helm (cloud) | Compose v2, Helm 3 |
@@ -1037,7 +1037,7 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 
 | Category | We Build (Core IP) | We Adopt (Battle-Tested) |
 |---|---|---|
-| Entity graph engine | Consensus engine | Spoon 11.3.0, PostgreSQL + AGE |
+| Entity graph engine | Consensus engine | Spoon 11.x, PostgreSQL + AGE |
 | Cross-repo resolution | Multi-source matcher, confidence scoring | MiSAR algorithm, Code2DFD patterns, MS Application Inspector rules, Buf, Backstage catalog model |
 | Wiki generation | Wiki agent, page planning, content generation | LangGraph, LangChain, Mermaid |
 | Chat intelligence | Adaptive search, graph-grounded verification, scope-aware retrieval | LangGraph, pgvector, pg_trgm |
@@ -1056,13 +1056,13 @@ Every external dependency we use, with purpose:
 
 | Purpose | Library | Why This One |
 |---|---|---|
-| Web framework | FastAPI 0.115+ | Async, OpenAPI auto-docs, WebSocket support |
-| Agent framework | LangGraph 0.3+ | Stateful graphs, checkpointing, multi-step reasoning |
-| LLM abstraction | LangChain 0.3+ | Multi-provider, tool calling, embeddings |
+| Web framework | FastAPI 0.128+ | Async, OpenAPI auto-docs, WebSocket support |
+| Agent framework | LangGraph 1.0+ | GA stable API, stateful graphs, checkpointing, multi-step reasoning |
+| LLM abstraction | LangChain 1.0+ | Stable API (no breaking changes until 2.0), multi-provider, tool calling, embeddings |
 | Database ORM | SQLAlchemy 2.0+ | Async support, mature, PostgreSQL-native |
 | Async PostgreSQL | asyncpg | Fastest Python PostgreSQL driver |
 | Kafka consumer/producer | aiokafka | Async-native, lightweight |
-| Background scheduling | APScheduler 4.0+ | Async-compatible, cron-style scheduling |
+| Background scheduling | APScheduler 3.11+ | Async-compatible, cron-style scheduling (4.0 still in alpha) |
 | Git mining | PyDriller 2.6+ | Commit history, blame, bus factor, churn analysis |
 | Git operations | GitPython 3.1+ | Clone, pull, diff |
 | OpenAPI parsing | openapi-spec-validator | Validate OpenAPI specs consumed from checked-in files (Java Extractor owns initial parsing via swagger-parser; Python validates for cross-repo matching) |
@@ -1071,16 +1071,16 @@ Every external dependency we use, with purpose:
 | GitHub API | PyGithub 2.x | PR comments, repo discovery, webhook validation |
 | GitLab API | python-gitlab 4.x | MR comments, repo discovery |
 | Bitbucket API | atlassian-python-api 3.x | PR comments, repo discovery for Bitbucket Cloud/Server |
-| Object storage | fsspec 2024.12+ | Unified S3/GCS/Azure/local filesystem |
+| Object storage | fsspec 2026.2+ | Unified S3/GCS/Azure/local filesystem |
 | HTTP client | httpx | Async HTTP for webhook delivery, MCP, external APIs |
 | Schema validation | pydantic 2.x | Kafka event validation, API request/response models |
-| Observability | opentelemetry-sdk, opentelemetry-instrumentation-fastapi, opentelemetry-instrumentation-asyncpg, opentelemetry-instrumentation-kafka-python, opentelemetry-instrumentation-httpx | Traces, metrics, logs — single OTel stack |
+| Observability | opentelemetry-sdk, opentelemetry-instrumentation-fastapi, opentelemetry-instrumentation-asyncpg, opentelemetry-instrumentation-aiokafka, opentelemetry-instrumentation-httpx | Traces, metrics, logs — single OTel stack |
 
 **Java Extractor:**
 
 | Purpose | Library | Why This One |
 |---|---|---|
-| Java analysis | Spoon 11.3.0 | Clean metamodel over JDT, NOCLASSPATH mode |
+| Java analysis | Spoon 11.x | Clean metamodel over JDT, NOCLASSPATH mode |
 | Static analysis | PMD 7.x | 400+ rules, source-only, no compilation |
 | Maven resolution | Maven Resolver (Apache) | Download dependency JARs without compiling |
 | Gradle resolution | Gradle Tooling API | Resolve dependencies from Gradle projects |
@@ -1091,14 +1091,14 @@ Every external dependency we use, with purpose:
 | Kafka client | kafka-clients (Apache) | Consume/produce events |
 | Git operations | JGit 7.x (Eclipse) | Diff within Java extractor (Python backend clones to shared volume; extractor reads from there, does NOT clone independently) |
 | Observability | opentelemetry-javaagent | Auto-instrumentation via javaagent — zero code changes for Kafka, JDBC, HTTP tracing |
-| JSON | Jackson 2.x | Kafka event serialization, config parsing |
+| JSON | Jackson 3.x (LTS) | Kafka event serialization, config parsing (3.x requires Java 17+, built-in java.time support) |
 
 **Frontend:**
 
 | Purpose | Library | Why This One |
 |---|---|---|
-| Framework | Next.js 15.3 | SSR for wiki pages, App Router |
-| Chat UI | Vercel AI SDK 4.x | useChat hook, streaming, tool status rendering |
+| Framework | Next.js 16 | SSR for wiki pages, App Router |
+| Chat UI | Vercel AI SDK 5.x | useChat hook (transport-based, sendMessage API), streaming, tool status rendering |
 | Diagrams | Mermaid 11.4+ | Client-side diagram rendering |
 | Markdown | react-markdown | Wiki page rendering |
 | Syntax highlighting | react-syntax-highlighter or Shiki | Code block rendering in wiki and chat |
@@ -1112,7 +1112,7 @@ Every external dependency we use, with purpose:
 ### Core Tables
 
 **users:**
-- id (UUID PK), email, name, avatar_url, password_hash (nullable), role (superadmin/admin/member), auth_provider (local/oidc), oidc_issuer, oidc_subject, is_active, created_at, last_login
+- id (UUID PK), email, name, avatar_url, password_hash (nullable), role (superadmin/admin/member), auth_provider (local/oidc), oidc_issuer, oidc_subject, daily_cost_cap_usd (DECIMAL nullable — admin-set per-user cost cap, null = use global default), is_active, created_at, last_login
 
 **user_connected_accounts:**
 - id (UUID PK), user_id (FK), provider (google/atlassian/notion), encrypted_access_token, encrypted_refresh_token, token_expires_at, external_email, connected_at
@@ -1254,6 +1254,18 @@ Every external dependency we use, with purpose:
 ## 13. Kafka Event Contracts
 
 All events use JSON. Schemas live in the `contracts/` directory.
+
+**Event producer/consumer map:**
+
+| Event | Producer | Consumer(s) |
+|---|---|---|
+| `repo.pushed` | Webhook handler / Poller / Manual trigger | Repo Indexer |
+| `repo.indexed` | Repo Indexer | Java Extractor |
+| `entities.extracted` | Java Extractor | Enrichment agent, Wiki Generator, Embedding Worker, API Catalog Builder |
+| `wiki.generated` | Wiki Generator | Embedding Worker |
+| `diagram.stale` | Wiki Generator (changed entities) / Admin API (membership changes) | Background consistency job |
+| `api.discovered` | API Catalog Builder | (informational — no active consumer, used for analytics + incremental updates) |
+| `repo_group.membership_changed` | Admin API (group membership endpoints) | Cross-repo resolution pipeline, Background consistency job |
 
 ### repo.pushed
 
@@ -1435,7 +1447,7 @@ OpenTelemetry is the single observability stack. Traces, metrics, and logs — a
 **Python backend:** `opentelemetry-sdk` + `opentelemetry-api` with auto-instrumentation:
 - `opentelemetry-instrumentation-fastapi` — traces every HTTP request
 - `opentelemetry-instrumentation-asyncpg` — traces every DB query
-- `opentelemetry-instrumentation-kafka-python` — traces Kafka produce/consume
+- `opentelemetry-instrumentation-aiokafka` — traces Kafka produce/consume (matches our aiokafka client)
 - `opentelemetry-instrumentation-httpx` — traces outbound HTTP (webhooks, MCP, LLM calls)
 - LangChain/LangGraph: `opentelemetry-instrumentation-langchain` or manual spans per agent step
 
@@ -1498,7 +1510,7 @@ Structured JSON logs via OTel Logs SDK. Correlated with traces via trace_id/span
 
 ### OTel Collector
 
-We ship an OTel Collector config in docker-compose for local deployments. Receives traces + metrics + logs from all components, exports to:
+We ship an OTel Collector config as an optional docker-compose override (`docker-compose.otel.yml`). Not part of the base 5-container deployment — you only add it if you want to ship telemetry to an external backend. Receives traces + metrics + logs from all components, exports to:
 - **Local:** stdout/file (default), or Jaeger for trace visualization
 - **Cloud:** any OTel-compatible backend — Grafana Cloud, Datadog, Honeycomb, AWS X-Ray, Google Cloud Trace
 
