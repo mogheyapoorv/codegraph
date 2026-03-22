@@ -56,7 +56,7 @@ graph TB
 
     subgraph Python Backend
         API[FastAPI<br/>REST API / Chat SSE / Webhooks<br/>Admin API / MCP Server]
-        AGENTS[LangGraph Agents<br/>Chat / Cross-Repo Analysis / Wiki Generator<br/>PR Context / Anomaly Detector / Enrichment<br/>API Catalog Builder]
+        AGENTS[Agents<br/>LangGraph: Chat / Cross-Repo / Wiki Gen / PR Context / Anomaly<br/>LangChain: Enrichment / API Catalog Builder]
         KAFKA_C[Kafka Consumers<br/>repo.pushed / repo.indexed<br/>entities.extracted / wiki.generated]
         JOBS[Background Jobs<br/>Poller / Diagram Consistency<br/>Anomaly Detection]
     end
@@ -128,14 +128,15 @@ Application code talks to repository interfaces. Never to PostgreSQL directly.
 
 | Component | Mode | Why |
 |---|---|---|
-| Java Extractor (Tier 1) | **Pipeline** | Deterministic AST analysis. No LLM involved. |
-| Enrichment (Tier 2) | **Agent** (LangChain) | LLM fills gaps for unknown annotations. |
-| Embedding Worker | **Pipeline** | Straightforward: chunk, embed, store. |
+| Repo Indexer | **Pipeline** | Consumes `repo.pushed`, clones/pulls repo to shared volume, computes git diff, stores source files, produces `repo.indexed`. This is the bridge between push events and extraction. |
+| Java Extractor (Tier 1) | **Pipeline** | Deterministic AST analysis via Spoon. No LLM. Reads from shared clone volume. |
+| Enrichment (Tier 2) | **Agent** (LangChain) | LLM fills gaps for unknown annotations. Simpler than LangGraph — no graph/checkpointing needed. |
+| Embedding Worker | **Pipeline** | Chunks source code + wiki content, embeds via LLM provider, stores in pgvector. Triggered by `entities.extracted` (code) and `wiki.generated` (wiki pages). |
 | Diagram Generator | **Pipeline** | Deterministic: entity graph in, Mermaid out. |
 | Wiki Generator | **Agent** (LangGraph) | Needs to plan structure and reason about content depth. |
 | Chat (all modes) | **Agent** (LangGraph) | Adaptive search, multi-step reasoning. |
 | Cross-Repo Analysis | **Agent** (LangGraph) | Structural + similarity + reasoning combined. |
-| API Catalog Builder | **Agent** (LangChain) | Generates realistic example payloads. |
+| API Catalog Builder | **Agent** (LangChain) | Generates realistic example payloads. Simpler than LangGraph — no graph/checkpointing needed. |
 | PR Context Injector | **Agent** (LangGraph) | Reasons about blast radius severity. |
 | Anomaly Detector | **Agent** (LangGraph) | Pattern detection, drift judgment. |
 
@@ -152,7 +153,7 @@ Everything is configuration-driven via environment variables:
 | Setting | Options | Controls |
 |---|---|---|
 | `CODEGRAPH_MODE` | local / cloud | Storage, caching, infrastructure |
-| `CODEGRAPH_STORAGE` | local / s3 / gcs / azure | Wiki content + diagram storage |
+| `CODEGRAPH_STORAGE` | postgres / s3 / gcs / azure | Wiki markdown content storage (diagrams always in PostgreSQL) |
 | `CODEGRAPH_CACHE` | postgres / redis | Caching layer |
 | `CODEGRAPH_AUTH_MODE` | local / oidc | Authentication provider |
 | `CODEGRAPH_LLM_MODE` | direct / proxy | LLM provider routing |
@@ -351,7 +352,7 @@ For external doc access (Confluence/Google Docs) when a user pastes a link in ch
 | **Polling** | Enterprises blocking inbound webhooks (first-class, not a fallback) | `git ls-remote` on configurable interval (default 6h), lightweight |
 | **Manual** | On-demand, force full re-index | UI button + API endpoint |
 
-All three produce the same `[repo.pushed]` Kafka event. Downstream workers don't know or care how the trigger happened.
+All three produce the same `repo.pushed` Kafka event. Downstream workers don't know or care how the trigger happened.
 
 ### Repo Groups
 
@@ -558,7 +559,7 @@ Here's what actually happens on a push (via webhook, polling, or manual trigger)
 
 Future extractors (Ruby, Python, TypeScript) follow the same contract:
 
-- Docker container (Java) or Python module (all others) that consumes `[repo.indexed]` from Kafka
+- Docker container (Java) or Python module (all others) that consumes `repo.indexed` from Kafka
 - Checks for matching files (*.rb, *.py, *.ts)
 - Runs language-native analysis tools (tree-sitter, Pyright, TS Compiler API)
 - Same tiered approach: deterministic first, LLM gap-fill for unknowns
@@ -974,7 +975,9 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 - Tier 2 enrichment (LangChain gap-fill agent)
 - Basic wiki generation (LangGraph wiki generator, single-repo)
 - Frontend (Next.js, wiki viewer, admin dashboard, setup wizard)
-- Docker Compose (4-container local deployment)
+- Embedding pipeline (chunking, pgvector population, vector search)
+- Database abstraction interface definitions (repository interfaces for each capability)
+- Docker Compose (5-container local deployment)
 
 ### Phase 2: Intelligence + Language Expansion
 
@@ -1061,11 +1064,12 @@ Every external dependency we use, with purpose:
 | Background scheduling | APScheduler 4.0+ | Async-compatible, cron-style scheduling |
 | Git mining | PyDriller 2.6+ | Commit history, blame, bus factor, churn analysis |
 | Git operations | GitPython 3.1+ | Clone, pull, diff |
-| OpenAPI parsing | openapi-spec-validator | Validate and parse OpenAPI/Swagger specs |
+| OpenAPI parsing | openapi-spec-validator | Validate OpenAPI specs consumed from checked-in files (Java Extractor owns initial parsing via swagger-parser; Python validates for cross-repo matching) |
 | YAML parsing | PyYAML / ruamel.yaml | Parse application.yml, config files |
 | JWT auth | PyJWT + authlib | Token validation, OIDC discovery |
 | GitHub API | PyGithub 2.x | PR comments, repo discovery, webhook validation |
 | GitLab API | python-gitlab 4.x | MR comments, repo discovery |
+| Bitbucket API | atlassian-python-api 3.x | PR comments, repo discovery for Bitbucket Cloud/Server |
 | Object storage | fsspec 2024.12+ | Unified S3/GCS/Azure/local filesystem |
 | HTTP client | httpx | Async HTTP for webhook delivery, MCP, external APIs |
 | Schema validation | pydantic 2.x | Kafka event validation, API request/response models |
@@ -1083,7 +1087,7 @@ Every external dependency we use, with purpose:
 | SQL parsing | JSqlParser | Parse Flyway/Liquibase migration SQL |
 | YAML parsing | SnakeYAML 2.x | Parse application.yml, Spring config |
 | Kafka client | kafka-clients (Apache) | Consume/produce events |
-| Git operations | JGit 7.x (Eclipse) | Clone, diff within Java extractor |
+| Git operations | JGit 7.x (Eclipse) | Diff within Java extractor (Python backend clones to shared volume; extractor reads from there, does NOT clone independently) |
 | JSON | Jackson 2.x | Kafka event serialization, config parsing |
 
 **Frontend:**
@@ -1127,11 +1131,11 @@ Every external dependency we use, with purpose:
 ### Entity Graph Tables
 
 **code_entities:**
-- id (UUID PK), repo_id (FK), entity_type, name, fully_qualified_name, file_path, line_start, line_end, language, signature, confidence, discovered_by, last_commit_sha, created_at, updated_at
+- id (UUID PK), repo_id (FK), entity_type, name, fully_qualified_name, file_path, line_start, line_end, language, signature, entity_confidence (FLOAT — how certain is this entity's type), discovered_by, risk_flags (JSONB — PMD/Ruff findings per entity), last_commit_sha, created_at, updated_at
 - Indexes: (repo_id, entity_type), (fully_qualified_name)
 
 **entity_relations:**
-- id (UUID PK), source_entity_id (FK CASCADE), target_entity_id (FK CASCADE), relation_type, is_cross_repo, confidence, discovered_by, evidence_file, evidence_line, created_at
+- id (UUID PK), source_entity_id (FK CASCADE), target_entity_id (FK CASCADE), relation_type, is_cross_repo, relation_confidence (FLOAT — how certain is this cross-repo connection), discovered_by, evidence_file, evidence_line, created_at
 - Indexes: (source_entity_id, relation_type), (target_entity_id, relation_type), (is_cross_repo) WHERE is_cross_repo = TRUE
 
 **group_cross_repo_relations:**
@@ -1223,7 +1227,24 @@ Every external dependency we use, with purpose:
 - id (UUID PK), integration_type (slack/teams/webhook), config (JSONB), created_by (FK), is_active, created_at
 
 **deep_research_reports:**
-- id (UUID PK), user_id (FK), title, scope_type, scope_id, query, plan (JSONB), findings (JSONB), report_content (TEXT), diagrams (JSONB), sources_used (JSONB), total_tokens, total_cost_usd, saved_as_wiki_page_id (FK nullable), created_at
+- id (UUID PK), user_id (FK), title, scope_type, scope_id, query, plan (JSONB), findings (JSONB), report_content (TEXT), diagrams (JSONB), sources_used (JSONB), total_tokens, total_cost_usd, saved_as_wiki_page_id (FK nullable), auto_saved (BOOLEAN DEFAULT TRUE), created_at
+
+### Anomaly Detection Tables
+
+**anomalies:**
+- id (UUID PK), repo_id (FK nullable), repo_group_id (FK nullable), anomaly_type (documentation_drift/dead_endpoint/shadow_dependency/convention_violation/orphaned_code/stale_wiki/missing_tests/config_drift), severity (high/medium/low), affected_entity_ids (JSONB), description (TEXT), suggested_action (TEXT), scan_job_id (FK background_job_runs), resolved (BOOLEAN DEFAULT FALSE), resolved_by (FK nullable), created_at, resolved_at
+
+### System Configuration Tables
+
+**system_settings:**
+- key (VARCHAR PK), value (JSONB), description, updated_by (FK), updated_at
+- Used for: cost caps (daily/monthly), concurrency limits, polling defaults, rate limit defaults, blast radius thresholds
+
+### Shared Repo Storage
+
+**repo_clones:**
+- id (UUID PK), repo_id (FK), clone_path (VARCHAR — local filesystem path), commit_sha (VARCHAR), status (cloning/ready/stale/deleted), created_at, updated_at
+- Shared volume between Python backend and Java Extractor. Python backend clones, Java Extractor reads from the same path.
 
 ---
 
@@ -1392,6 +1413,13 @@ Anomalies show up in the Admin Dashboard under the "Anomalies" tab. Each anomaly
 ### API Rate Limiting
 
 Per API key: configurable RPM (requests per minute) set when key is created. Default: 60 RPM.
+
+### Rate Limit Counter Storage
+
+- **Local mode (no Redis):** In-memory sliding window counters in the Python backend. Resets on restart — acceptable for single-instance deployments.
+- **Cloud mode (Redis available):** Redis sorted sets for distributed rate limiting across multiple backend instances. Standard pattern, battle-tested.
+
+Cost caps and rate limit configuration stored in the `system_settings` table (Section 12).
 
 ---
 
