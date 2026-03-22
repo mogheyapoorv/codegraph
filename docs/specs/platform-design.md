@@ -157,6 +157,7 @@ Everything is configuration-driven via environment variables:
 | `CODEGRAPH_CACHE` | postgres / redis | Caching layer |
 | `CODEGRAPH_AUTH_MODE` | local / oidc | Authentication provider |
 | `CODEGRAPH_LLM_MODE` | direct / proxy | LLM provider routing |
+| `CODEGRAPH_OTEL_ENDPOINT` | URL or empty | OTel Collector endpoint. Empty = local file export only. |
 
 All application settings (LLM config, repos, groups, routing) are configurable via the Admin Dashboard at runtime. No restarts needed.
 
@@ -1073,6 +1074,7 @@ Every external dependency we use, with purpose:
 | Object storage | fsspec 2024.12+ | Unified S3/GCS/Azure/local filesystem |
 | HTTP client | httpx | Async HTTP for webhook delivery, MCP, external APIs |
 | Schema validation | pydantic 2.x | Kafka event validation, API request/response models |
+| Observability | opentelemetry-sdk, opentelemetry-instrumentation-fastapi, opentelemetry-instrumentation-asyncpg, opentelemetry-instrumentation-kafka-python, opentelemetry-instrumentation-httpx | Traces, metrics, logs — single OTel stack |
 
 **Java Extractor:**
 
@@ -1088,6 +1090,7 @@ Every external dependency we use, with purpose:
 | YAML parsing | SnakeYAML 2.x | Parse application.yml, Spring config |
 | Kafka client | kafka-clients (Apache) | Consume/produce events |
 | Git operations | JGit 7.x (Eclipse) | Diff within Java extractor (Python backend clones to shared volume; extractor reads from there, does NOT clone independently) |
+| Observability | opentelemetry-javaagent | Auto-instrumentation via javaagent — zero code changes for Kafka, JDBC, HTTP tracing |
 | JSON | Jackson 2.x | Kafka event serialization, config parsing |
 
 **Frontend:**
@@ -1425,36 +1428,81 @@ Cost caps and rate limit configuration stored in the `system_settings` table (Se
 
 ## 16. Observability
 
-### Structured Logging
+OpenTelemetry is the single observability stack. Traces, metrics, and logs — all through OTel. No Prometheus client libraries, no custom log shippers, no separate tracing SDKs. One standard, one set of instrumentation.
 
-All components emit structured JSON logs:
-- Request ID propagated across Kafka events and agent steps
+### OpenTelemetry Setup
+
+**Python backend:** `opentelemetry-sdk` + `opentelemetry-api` with auto-instrumentation:
+- `opentelemetry-instrumentation-fastapi` — traces every HTTP request
+- `opentelemetry-instrumentation-asyncpg` — traces every DB query
+- `opentelemetry-instrumentation-kafka-python` — traces Kafka produce/consume
+- `opentelemetry-instrumentation-httpx` — traces outbound HTTP (webhooks, MCP, LLM calls)
+- LangChain/LangGraph: `opentelemetry-instrumentation-langchain` or manual spans per agent step
+
+**Java Extractor:** `opentelemetry-java-agent` (javaagent auto-instrumentation):
+- Auto-instruments Kafka client, JDBC, HTTP clients with zero code changes
+- Attach via `JAVA_TOOL_OPTIONS=-javaagent:opentelemetry-javaagent.jar`
+
+**Frontend:** `@opentelemetry/sdk-trace-web` for browser-side performance traces (page loads, chat latency).
+
+### Traces
+
+Every operation gets a trace with span hierarchy:
+
+```
+trace: wiki-generation
+  span: repo.pushed (Kafka consume)
+    span: git-pull
+    span: file-diff
+  span: repo.indexed (Kafka produce)
+  span: entities.extracted (Java extractor)
+    span: spoon-parse (per file batch)
+    span: framework-parser
+    span: consensus-engine
+  span: embedding (chunk + embed)
+  span: wiki-generate (LangGraph agent)
+    span: plan-structure
+    span: generate-page (per page)
+      span: llm-call (model, tokens, latency)
+```
+
+Kafka event chains are correlated via `traceparent` header propagated through Kafka message headers. One trace follows a repo push all the way through extraction → embedding → wiki generation → diagram update.
+
+### Metrics
+
+OTel metrics SDK exports to any OTel-compatible backend (Prometheus via OTel Collector, Grafana Cloud, Datadog, etc.):
+
+- `codegraph.indexing.jobs.total` (counter, by status: completed/failed)
+- `codegraph.indexing.duration_seconds` (histogram, by repo)
+- `codegraph.kafka.consumer.lag` (gauge, by topic)
+- `codegraph.llm.call.duration_seconds` (histogram, by provider, model)
+- `codegraph.llm.tokens.total` (counter, by provider, model, direction: input/output)
+- `codegraph.llm.cost.usd` (counter, by provider, model, operation)
+- `codegraph.chat.response.duration_seconds` (histogram, by mode: quick/conversational/research)
+- `codegraph.entity_graph.size` (gauge — total entities, total relations)
+- `codegraph.active_users` (gauge)
+
+### Logs
+
+Structured JSON logs via OTel Logs SDK. Correlated with traces via trace_id/span_id:
+- Every log line carries: timestamp, service, trace_id, span_id, level, message, attributes
 - Log levels: DEBUG, INFO, WARNING, ERROR
-- Key fields: timestamp, service, request_id, repo_id, operation, duration_ms, error
+- Key attributes: repo_id, operation, duration_ms, error
 
 ### Health Checks
 
 - `GET /health` — backend liveness
 - `GET /health/ready` — readiness (PostgreSQL connected, Kafka connected)
-- Kafka consumer lag monitoring
+- Kafka consumer lag monitoring (via OTel metrics)
 - Background job last-run tracking
 
-### Metrics
+### OTel Collector
 
-Key operational metrics (exportable to Prometheus/Grafana):
-- Indexing job success/failure rates
-- Kafka consumer lag per topic
-- LLM call latency per provider per model
-- Chat response latency (P50, P95, P99)
-- Entity graph size and growth trends
-- Active users, concurrent chat sessions
+We ship an OTel Collector config in docker-compose for local deployments. Receives traces + metrics + logs from all components, exports to:
+- **Local:** stdout/file (default), or Jaeger for trace visualization
+- **Cloud:** any OTel-compatible backend — Grafana Cloud, Datadog, Honeycomb, AWS X-Ray, Google Cloud Trace
 
-### Distributed Tracing
-
-OpenTelemetry integration for tracing across:
-- Kafka event chains (repo.pushed → repo.indexed → entities.extracted → wiki.generated)
-- Agent step execution (LangGraph states)
-- Tool call latency within agents
+Admin configures the export target via `CODEGRAPH_OTEL_ENDPOINT` env var. If not set, observability data goes to local files only.
 
 ---
 
