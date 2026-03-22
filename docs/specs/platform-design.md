@@ -11,7 +11,7 @@
 ### Primary Use Cases
 - **Internal developer tool** — a large org (50+ people, 500+ repos) uses CodeGraph to document, explore, and understand their codebase
 - **Open-source platform** — we want this to be the most comprehensive open-source repo documentation and code intelligence tool out there
-- **Competitive with commercial offerings** — Greptile ($180M valuation, code review + intelligence), DeepWiki Commercial (Cognition/Devin, wiki generation), Sourcegraph (code search)
+- **Compete with the best** — we're going after the same problems Greptile, Sourcegraph, and others are solving, but fully open-source and self-hostable
 
 ### Design Principles
 - **Fully open-source** — no enterprise edition gate. Everything ships open.
@@ -24,11 +24,11 @@
 - **CQRS architecture** — write path (async, event-driven) is separated from read path (sync, direct queries)
 
 ### Competitive Advantages
-- **Entity graph from AST** — deterministic, not LLM-inferred. More accurate than Greptile's vector-only approach.
-- **Cross-repo intelligence** — our entity graph spans repos. Neither Greptile nor DeepWiki Commercial does this.
-- **API Playground** — auto-generated curl/grpcurl for every discovered endpoint. Nobody else does this.
-- **Multi-host support** — GitHub + GitLab + Bitbucket. DeepWiki Commercial is GitHub-only.
-- **Self-hosted with full cost control** — vs opaque ACU pricing (Devin) or per-seat pricing (Greptile).
+- **Entity graph from AST** — deterministic, not LLM-inferred. Compiler-level accuracy, not vibes.
+- **Cross-repo intelligence** — our entity graph spans repos. We connect the dots between services that commercial tools treat as isolated.
+- **API Playground** — auto-generated curl/grpcurl for every discovered endpoint. Copy-paste and test.
+- **Multi-host support** — GitHub + GitLab + Bitbucket. Not locked to one platform.
+- **Self-hosted with full cost control** — you control the LLM spend, not a vendor's pricing page.
 
 ---
 
