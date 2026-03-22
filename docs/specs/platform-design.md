@@ -48,70 +48,51 @@ READ PATH (sync, direct):
 
 ### Architecture Diagram
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Next.js 15 + Vercel AI SDK                                  │
-│  Wiki Viewer · Chat · API Playground · Entity Graph Explorer │
-│  Admin Dashboard · Setup Wizard                               │
-└──────────────────────────┬───────────────────────────────────┘
-                           │ REST + SSE + WebSocket
-┌──────────────────────────▼───────────────────────────────────┐
-│  Python Backend (FastAPI + LangGraph + LangChain)            │
-│                                                               │
-│  API Layer (FastAPI):                                        │
-│    REST API — wiki, diagrams, entity graph, API catalog      │
-│    Chat endpoint (SSE streaming)                              │
-│    Webhook receiver (GitHub/GitLab/Bitbucket)                │
-│    Admin API                                                  │
-│    MCP server                                                 │
-│                                                               │
-│  Agents (LangGraph):                                         │
-│    Chat (Quick Ask, Conversational, Deep Research)            │
-│    Cross-Repo Analysis                                       │
-│    Wiki Generator                                             │
-│    PR Context Injector                                        │
-│    Anomaly Detector                                           │
-│    Enrichment (Tier 2 gap-fill)                              │
-│    API Catalog Builder                                        │
-│                                                               │
-│  Kafka Consumers:                                            │
-│    repo.pushed, repo.indexed, entities.extracted              │
-│    wiki.generated, diagram.stale, api.discovered             │
-│                                                               │
-│  Background Jobs:                                            │
-│    Poller (git ls-remote on schedule)                        │
-│    Diagram consistency job (every 5 min)                     │
-│    Anomaly detection scan                                    │
-│                                                               │
-│  Data Access (all in-process, zero network hop):             │
-│    PostgreSQL via SQLAlchemy/asyncpg                          │
-│    pgvector, Apache AGE, tsvector, pg_trgm                   │
-└──────────────────────────────────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│  Java Extractor (JVM — separate container)                   │
-│  Eclipse JDT + Framework Parsers                             │
-│  Tier 1 deterministic extraction only. Zero LLM.            │
-│  Consumes: [repo.indexed] from Kafka                         │
-│  Produces: [entities.extracted] to Kafka                     │
-│  Writes: entities, relations, code snippets, source files    │
-│          directly to PostgreSQL                               │
-└──────────────────────────────────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│  PostgreSQL (single database, multiple capabilities)         │
-│  pgvector  — embeddings, vector search                       │
-│  AGE       — entity graph, Cypher traversal                  │
-│  tsvector  — wiki full-text search                           │
-│  pg_trgm   — source code trigram search                      │
-│  relational — users, repos, groups, jobs, config, analytics  │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Frontend
+        UI[Next.js 15 + Vercel AI SDK<br/>Wiki Viewer / Chat / API Playground<br/>Entity Graph Explorer / Admin Dashboard]
+    end
 
-┌────────────────┐  ┌───────────────────────────────────────┐
-│  Kafka (KRaft) │  │  Optional (cloud/scale):              │
-│  Event Bus     │  │  Redis (cache), Object Storage (S3/   │
-└────────────────┘  │  GCS), Keycloak (OIDC/SAML)          │
-                    └───────────────────────────────────────┘
+    subgraph Python Backend
+        API[FastAPI<br/>REST API / Chat SSE / Webhooks<br/>Admin API / MCP Server]
+        AGENTS[LangGraph Agents<br/>Chat / Cross-Repo Analysis / Wiki Generator<br/>PR Context / Anomaly Detector / Enrichment<br/>API Catalog Builder]
+        KAFKA_C[Kafka Consumers<br/>repo.pushed / repo.indexed<br/>entities.extracted / wiki.generated]
+        JOBS[Background Jobs<br/>Poller / Diagram Consistency<br/>Anomaly Detection]
+    end
+
+    subgraph Java Extractor
+        JDT[Eclipse JDT + Framework Parsers<br/>Tier 1 deterministic extraction<br/>Zero LLM]
+    end
+
+    subgraph PostgreSQL
+        PG_REL[(Relational<br/>users / repos / groups / jobs)]
+        PG_VEC[(pgvector<br/>embeddings)]
+        PG_AGE[(Apache AGE<br/>entity graph)]
+        PG_TRGM[(pg_trgm<br/>code search)]
+        PG_TS[(tsvector<br/>wiki search)]
+    end
+
+    KAFKA[[Kafka - KRaft<br/>Event Bus]]
+
+    subgraph Optional
+        REDIS[(Redis<br/>cache)]
+        S3[(Object Storage<br/>S3 / GCS)]
+        KC[Keycloak<br/>OIDC / SAML]
+    end
+
+    UI -->|REST + SSE + WebSocket| API
+    API --> AGENTS
+    API --> KAFKA_C
+    API --> JOBS
+    AGENTS --> PG_REL
+    AGENTS --> PG_VEC
+    AGENTS --> PG_AGE
+    KAFKA_C --> KAFKA
+    JDT -->|consumes repo.indexed| KAFKA
+    JDT -->|produces entities.extracted| KAFKA
+    JDT --> PG_REL
+    KAFKA --> KAFKA_C
 ```
 
 ### Core Technology Decisions
@@ -177,6 +158,103 @@ Everything is configuration-driven via environment variables:
 | `CODEGRAPH_LLM_MODE` | direct / proxy | LLM provider routing |
 
 All application settings (LLM config, repos, groups, routing) are configurable via the Admin Dashboard at runtime. No restarts needed.
+
+### Local Setup
+
+Getting CodeGraph running locally:
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/mogheyapoorv/codegraph.git
+cd codegraph
+
+# 2. Copy and edit environment file
+cp .env.example .env
+# Edit .env — at minimum set one LLM provider API key
+
+# 3. Start everything
+docker-compose up
+
+# That's it. Five containers start:
+#   postgres (pgvector + AGE + pg_trgm)
+#   kafka (KRaft, single broker)
+#   backend (Python — FastAPI + LangGraph)
+#   java-extractor (JVM — Eclipse JDT)
+#   frontend (Next.js)
+
+# 4. Open http://localhost:3000/setup for first-time admin bootstrap
+```
+
+For OIDC/SSO, uncomment the keycloak service in docker-compose and set `CODEGRAPH_AUTH_MODE=oidc`.
+
+### Kubernetes / Helm Chart
+
+For cloud and production deployments, we provide a Helm chart:
+
+```bash
+# Add the CodeGraph Helm repo
+helm repo add codegraph https://mogheyapoorv.github.io/codegraph/charts
+helm repo update
+
+# Install with default values (uses managed services)
+helm install codegraph codegraph/codegraph \
+  --namespace codegraph \
+  --create-namespace \
+  -f values.yaml
+```
+
+Key `values.yaml` settings:
+
+```yaml
+# Deployment mode
+mode: cloud
+
+# Managed PostgreSQL (RDS, Cloud SQL, etc.)
+database:
+  url: postgresql://user:pass@rds-instance:5432/codegraph
+
+# Managed Kafka (MSK, Confluent Cloud, etc.)
+kafka:
+  bootstrapServers: msk-cluster:9092
+
+# Object Storage for wiki content
+storage:
+  type: s3
+  bucket: codegraph-data
+  region: us-east-1
+
+# Optional Redis for caching
+cache:
+  type: redis
+  url: redis://elasticache:6379
+
+# LLM configuration
+llm:
+  mode: direct
+  provider: anthropic
+  apiKeySecret: codegraph-llm-key  # K8s secret reference
+
+# Scaling
+backend:
+  replicas: 2
+javaExtractor:
+  replicas: 2
+frontend:
+  replicas: 2
+
+# Auth
+auth:
+  mode: oidc
+  issuerUrl: https://keycloak.company.com/realms/codegraph
+```
+
+The Helm chart supports:
+- Horizontal scaling per component (backend, java-extractor, frontend independently)
+- Managed database, Kafka, Redis, and object storage
+- K8s secrets for API keys and credentials
+- Ingress configuration with TLS
+- Resource limits and requests per container
+- Health check and readiness probe configuration
 
 ---
 
@@ -370,6 +448,19 @@ Three analyzers run in parallel, and a consensus engine merges the results:
 - Produces: classes, methods, fields, annotations, call graph, type hierarchy, import graph
 - Annotation scanning: classifies every annotation as known-framework or custom
 - Lombok plugin for desugaring (no compilation needed)
+
+**Why Eclipse JDT?** We evaluated the alternatives:
+
+| Tool | Type Resolution | No Build Required? | Why Not |
+|---|---|---|---|
+| **Eclipse JDT** | 95%+ (compiler-grade) | Yes (source + JARs) | **Our choice.** |
+| **Spoon (INRIA)** | Same as JDT (built on top of it) | Yes, with NOCLASSPATH mode | Viable alternative. Cleaner API, but extra abstraction layer. We may switch to Spoon if JDT's API verbosity becomes a maintenance issue. |
+| **JavaParser + Symbol Solver** | 60-80% (known gaps with generics, lambdas, overloads) | Yes | Resolution accuracy too low for reliable call graphs on enterprise code. |
+| **IntelliJ PSI** | Best-in-class | Impractical outside IDE | Can't be extracted from the IntelliJ platform. JetBrains themselves say it's not supported. |
+| **tree-sitter** | None (syntax only) | Yes | No semantic analysis. Useful for other languages where no better parser exists, but not for Java. |
+| **Soot/SootUp** | Full (bytecode only) | No — needs compilation | Best call graph construction, but requires compiled .class files. We can't reliably compile arbitrary repos. |
+
+JDT gives us compiler-grade type resolution from source without compilation. That's the hard requirement. The 20+ years of production use and active maintenance (1K+ commits/year) seal it. Spoon is our fallback if we want a cleaner API — it uses JDT underneath so the resolution quality is identical.
 
 **Analyzer 2 — Framework-Specific Parsers:**
 - Spring annotations → beans, endpoints, DI wiring
