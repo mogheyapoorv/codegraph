@@ -465,13 +465,13 @@ Three analyzers run in parallel, and a consensus engine merges the results:
 Spoon gives us JDT's compiler-grade type resolution with a clean metamodel and NOCLASSPATH mode for graceful handling of missing dependencies. It's actively maintained (v11.3.0, supports Java 21+), and the INRIA research team behind it has been at this for 15+ years.
 
 **Analyzer 2 — Framework-Specific Parsers:**
-- Spring annotations → beans, endpoints, DI wiring
-- JPA annotations → entities, tables, relations
-- Proto files → gRPC services, methods (parsed directly, not compiled)
-- OpenAPI spec (if checked in) → full API catalog
-- SQL migrations (Flyway/Liquibase) → actual DB schema
-- application.yml / application.properties → config keys with values
-- pom.xml / build.gradle → dependency graph
+- Spring annotations → beans, endpoints, DI wiring (via Spoon `CtAnnotation` processors)
+- JPA annotations → entities, tables, relations (via Spoon)
+- Proto files → gRPC services, methods (via **protobuf-java**, parsed directly, not compiled)
+- OpenAPI spec (if checked in) → full API catalog (via **swagger-parser 2.x**)
+- SQL migrations (Flyway/Liquibase) → actual DB schema (via **JSqlParser**)
+- application.yml / application.properties → config keys with values (via **SnakeYAML 2.x**)
+- pom.xml → dependency graph (via **Maven Resolver**), build.gradle → (via **Gradle Tooling API**)
 
 **Analyzer 3 — File-Level Analyzers:**
 - Dockerfile → docker_service entities
@@ -513,13 +513,18 @@ For entities that Tier 1 couldn't classify (custom annotations, internal framewo
 
 ### Static Risk Analysis
 
-Deterministic rules (SpotBugs/PMD-style patterns), no LLM:
-- Empty catch blocks
-- Unauthenticated public endpoints
-- No null checks on external API returns
-- High cyclomatic complexity
-- Missing test files for entities
-- Hardcoded strings matching credential patterns
+We use **PMD 7.x** for Java static analysis — runs directly on source code, no compilation needed. PMD gives us 400+ built-in rules out of the box:
+- Error prone: empty catch blocks, null checks, broken equals/hashCode
+- Security: hardcoded credentials, insecure crypto
+- Design: god classes, cyclomatic complexity, excessive method length
+- Best practices: missing @Override, loose coupling
+
+For Phase 2 languages:
+- Python: **Ruff** (Rust-based, extremely fast, replaces flake8/pylint)
+- Ruby: **RuboCop**
+- TypeScript/JS: **Biome** (Rust-based, replaces ESLint for linting + formatting)
+
+Risk flags are stored per entity in the entity graph. No custom rule engine — we use these tools' APIs programmatically.
 
 ### API Catalog & curl/grpcurl Generation
 
@@ -873,16 +878,16 @@ Every LangChain/LangGraph LLM call automatically captures token usage via callba
 
 Per-repo and per-group metrics, all derived from existing data (no additional indexing or LLM):
 
-| Metric | Source |
-|---|---|
-| Documentation coverage | % of entities with wiki sections |
-| Wiki staleness | % of pages marked stale |
-| Orphaned code | Entities with zero incoming edges |
-| Test coverage gaps | Entities with no corresponding test file |
-| Complexity hotspots | High complexity + high blast radius |
-| Cross-repo coupling | Repos with too many cross-repo edges |
-| Bus factor | Modules with single-contributor knowledge |
-| Change frequency | Most changed files in last 90 days |
+| Metric | Source | Tool |
+|---|---|---|
+| Documentation coverage | % of entities with wiki sections | Entity graph query |
+| Wiki staleness | % of pages marked stale | wiki_pages table |
+| Orphaned code | Entities with zero incoming edges | Entity graph query (Apache AGE) |
+| Test coverage gaps | Entities with no corresponding test file | Test-to-source file mapping |
+| Complexity hotspots | High complexity + high blast radius | **PMD 7.x** (Java), **Ruff** (Python), **Biome** (TS) |
+| Cross-repo coupling | Repos with too many cross-repo edges | Entity graph query |
+| Bus factor | Modules with single-contributor knowledge | **PyDriller** git mining |
+| Change frequency | Most changed files in last 90 days | **PyDriller** commit analysis |
 
 ---
 
@@ -957,12 +962,69 @@ Per-repo and per-group metrics, all derived from existing data (no additional in
 
 | Category | We Build (Core IP) | We Adopt (Battle-Tested) |
 |---|---|---|
-| Entity graph engine | Extraction pipeline, consensus engine, cross-repo resolution | PostgreSQL + AGE, Spoon 11.3.0 |
+| Entity graph engine | Consensus engine, cross-repo resolution logic | Spoon 11.3.0, PostgreSQL + AGE |
 | Wiki generation | Wiki agent, page planning, content generation | LangGraph, LangChain, Mermaid |
 | Chat intelligence | Adaptive search, graph-grounded verification, scope-aware retrieval | LangGraph, pgvector, pg_trgm |
-| API Catalog | Endpoint discovery, curl/grpcurl generation, payload examples | OpenAPI parser, protobuf parser |
+| API Catalog | curl/grpcurl template generation, payload examples | swagger-parser, protobuf, Spoon type resolution |
+| Static analysis | Risk flag storage per entity | PMD 7.x (Java), Ruff (Python), RuboCop (Ruby), Biome (TS/JS) |
+| Git intelligence | Metric aggregation per entity | PyDriller (git mining, bus factor, churn) |
 | Plugin model | Event contracts, extractor interface | Kafka, Docker |
-| Auth | JWT middleware, setup wizard | Keycloak, OIDC standard |
+| Auth | Setup wizard, role middleware | Keycloak, authlib, PyJWT |
+| PR integration | Comment formatting, blast radius rendering | PyGithub (GitHub), python-gitlab (GitLab) |
+
+### Full Library Inventory
+
+Every external dependency we use, with purpose:
+
+**Python Backend:**
+
+| Purpose | Library | Why This One |
+|---|---|---|
+| Web framework | FastAPI 0.115+ | Async, OpenAPI auto-docs, WebSocket support |
+| Agent framework | LangGraph 0.3+ | Stateful graphs, checkpointing, multi-step reasoning |
+| LLM abstraction | LangChain 0.3+ | Multi-provider, tool calling, embeddings |
+| Database ORM | SQLAlchemy 2.0+ | Async support, mature, PostgreSQL-native |
+| Async PostgreSQL | asyncpg | Fastest Python PostgreSQL driver |
+| Kafka consumer/producer | aiokafka | Async-native, lightweight |
+| Background scheduling | APScheduler 4.0+ | Async-compatible, cron-style scheduling |
+| Git mining | PyDriller 2.6+ | Commit history, blame, bus factor, churn analysis |
+| Git operations | GitPython 3.1+ | Clone, pull, diff |
+| OpenAPI parsing | openapi-spec-validator | Validate and parse OpenAPI/Swagger specs |
+| YAML parsing | PyYAML / ruamel.yaml | Parse application.yml, config files |
+| JWT auth | PyJWT + authlib | Token validation, OIDC discovery |
+| GitHub API | PyGithub 2.x | PR comments, repo discovery, webhook validation |
+| GitLab API | python-gitlab 4.x | MR comments, repo discovery |
+| Object storage | fsspec 2024.12+ | Unified S3/GCS/Azure/local filesystem |
+| HTTP client | httpx | Async HTTP for webhook delivery, MCP, external APIs |
+| Schema validation | pydantic 2.x | Kafka event validation, API request/response models |
+
+**Java Extractor:**
+
+| Purpose | Library | Why This One |
+|---|---|---|
+| Java analysis | Spoon 11.3.0 | Clean metamodel over JDT, NOCLASSPATH mode |
+| Static analysis | PMD 7.x | 400+ rules, source-only, no compilation |
+| Maven resolution | Maven Resolver (Apache) | Download dependency JARs without compiling |
+| Gradle resolution | Gradle Tooling API | Resolve dependencies from Gradle projects |
+| Protobuf parsing | protobuf-java (Google) | Parse .proto files for gRPC service extraction |
+| OpenAPI parsing | swagger-parser 2.x | Parse checked-in OpenAPI specs |
+| SQL parsing | JSqlParser | Parse Flyway/Liquibase migration SQL |
+| YAML parsing | SnakeYAML 2.x | Parse application.yml, Spring config |
+| Kafka client | kafka-clients (Apache) | Consume/produce events |
+| Git operations | JGit 7.x (Eclipse) | Clone, diff within Java extractor |
+| JSON | Jackson 2.x | Kafka event serialization, config parsing |
+
+**Frontend:**
+
+| Purpose | Library | Why This One |
+|---|---|---|
+| Framework | Next.js 15.3 | SSR for wiki pages, App Router |
+| Chat UI | Vercel AI SDK 4.x | useChat hook, streaming, tool status rendering |
+| Diagrams | Mermaid 11.4+ | Client-side diagram rendering |
+| Markdown | react-markdown | Wiki page rendering |
+| Syntax highlighting | react-syntax-highlighter or Shiki | Code block rendering in wiki and chat |
+| Styling | Tailwind CSS 4 | Utility-first, fast iteration |
+| Pan/zoom | svg-pan-zoom | Interactive diagram navigation |
 
 ---
 
