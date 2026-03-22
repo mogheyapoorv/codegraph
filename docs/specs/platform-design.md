@@ -23,12 +23,12 @@
 - **Deterministic extraction, intelligent generation** — code analysis is compiler-accurate. LLM only handles natural language and gap-filling.
 - **CQRS architecture** — write path (async, event-driven) is separated from read path (sync, direct queries)
 
-### Competitive Advantages
-- **Entity graph from AST** — deterministic, not LLM-inferred. Compiler-level accuracy, not vibes.
-- **Cross-repo intelligence** — our entity graph spans repos. We connect the dots between services that commercial tools treat as isolated.
-- **API Playground** — auto-generated curl/grpcurl for every discovered endpoint. Copy-paste and test.
-- **Multi-host support** — GitHub + GitLab + Bitbucket. Not locked to one platform.
-- **Self-hosted with full cost control** — you control the LLM spend, not a vendor's pricing page.
+### What We Think We Can Do Well
+- **Entity graph from AST** — we extract code structure using compiler-level tools, so the graph is deterministic and verifiable rather than LLM-inferred
+- **Cross-repo intelligence** — the entity graph spans repos, which lets us show how services actually connect and depend on each other
+- **API Playground** — auto-generated curl/grpcurl for every discovered endpoint, so developers can test without leaving the wiki
+- **Multi-host support** — GitHub, GitLab, and Bitbucket from day one
+- **Self-hosted with full cost control** — teams run it on their own infrastructure and manage their own LLM spend
 
 ---
 
