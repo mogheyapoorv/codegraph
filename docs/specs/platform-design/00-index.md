@@ -23,6 +23,7 @@
 | [09-data-model.md](09-data-model.md) | 12 | All database tables |
 | [10-event-contracts.md](10-event-contracts.md) | 13 | Event schemas and producer/consumer map |
 | [11-scaling-and-phasing.md](11-scaling-and-phasing.md) | 10, 17 | Build phases, scaling limits, migration paths |
+| [12-references.md](12-references.md) | — | All external libraries, tools, standards, and academic references with links |
 
 ## Cross-Reference Map
 
